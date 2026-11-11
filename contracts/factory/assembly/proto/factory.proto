@@ -1,0 +1,195 @@
+syntax = "proto3";
+package factory;
+import "koinos/options.proto";
+
+/*
+* Objects
+*/
+message empty_object {}
+
+message address {
+  bytes value = 1 [(koinos.btype) = ADDRESS];
+}
+
+message int32_value {
+  int32 value = 1;
+}
+
+message bool_value {
+  bool value = 1;
+}
+
+// token identifier: system tokens (koin, vhp) are resolved through the name service
+message token_object {
+  bool is_nameservice = 1;
+  string nameservice = 2;
+  bytes token_address = 3 [(koinos.btype) = ADDRESS];
+}
+
+message pool_info {
+  bytes pool = 1 [(koinos.btype) = ADDRESS];
+  string token0 = 2;
+  string token1 = 3;
+  uint32 fee = 4;
+  int32 tick_spacing = 5;
+}
+
+/*
+* Storage records (internal)
+*/
+message fee_record {
+  sint32 tick_spacing = 1;
+}
+
+message counter_record {
+  uint64 value = 1 [jstype = JS_STRING];
+}
+
+/*
+* Arguments sent to the pool (wire compatible with pool.configure_arguments)
+*/
+message pool_configure_args {
+  token_object token0 = 1;
+  token_object token1 = 2;
+  uint32 fee = 3;
+  int32 tick_spacing = 4;
+}
+
+/*
+* Read methods
+*/
+
+// @description Get the current owner of the factory
+// @read-only true
+// @result address
+message owner_arguments {}
+
+// @description Get the owner proposed by set_owner, empty if none (it becomes the owner when it calls accept_owner)
+// @read-only true
+// @result address
+message pending_owner_arguments {}
+
+// @description Get the tick spacing for a given fee amount, if enabled, or 0 if not enabled
+// @read-only true
+// @result int32_value
+message fee_amount_tick_spacing_arguments {
+  uint32 fee = 1;
+}
+
+// @description Get the pool address for a given pair of tokens and a fee, or an empty address if it does not exist
+// @read-only true
+// @result address
+message get_pool_arguments {
+  string token_a = 1;
+  string token_b = 2;
+  uint32 fee = 3;
+}
+
+// @description Whether create_pool skips the allowance check of a token (see set_allowances_exempt)
+// @read-only true
+// @result bool_value
+message allowances_exempt_arguments {
+  string token = 1;
+}
+
+// @description Get a page of the pools created by the factory, starting at index `start`
+// @read-only true
+message get_pools_arguments {
+  uint64 start = 1 [jstype = JS_STRING];
+  uint32 limit = 2;
+}
+message get_pools_result {
+  repeated pool_info pools = 1;
+  uint64 total = 2 [jstype = JS_STRING];
+}
+
+/*
+* Write methods
+*/
+
+// @description Create a pool for the given two tokens and fee. Must be an operation of the transaction (not a call from a contract) that uploads the pool bytecode in an earlier operation; the pool address must have no allowances on the two tokens
+// @read-only false
+// @result address
+message create_pool_arguments {
+  string token_a = 1;
+  string token_b = 2;
+  uint32 fee = 3;
+}
+
+// @description Propose a new owner of the factory (only owner): it becomes the owner when it calls accept_owner
+// @read-only false
+// @result empty_object
+message set_owner_arguments {
+  bytes owner = 1 [(koinos.btype) = ADDRESS];
+}
+
+// @description Accept the ownership of the factory (only the owner proposed by set_owner)
+// @read-only false
+// @result empty_object
+message accept_owner_arguments {}
+
+// @description Enable a fee amount with the given tick spacing (only owner)
+// @read-only false
+// @result empty_object
+message enable_fee_amount_arguments {
+  uint32 fee = 1;
+  int32 tick_spacing = 2;
+}
+
+// @description Exempt a token from the allowance check of create_pool, or remove the exemption (only owner). Only for tokens that have no allowances (no approve, e.g. KCS-1 tokens) and so can't answer get_allowances
+// @read-only false
+// @result empty_object
+message set_allowances_exempt_arguments {
+  string token = 1;
+  bool exempt = 2;
+}
+
+/*
+* KCS-4 messages: create_pool reads the allowances of the new pool on its tokens (get_allowances)
+*/
+message token_get_allowances_args {
+  bytes owner = 1 [(koinos.btype) = ADDRESS];
+  bytes start = 2 [(koinos.btype) = ADDRESS];
+  int32 limit = 3;
+  bool descending = 4;
+}
+message token_spender_value {
+  bytes spender = 1 [(koinos.btype) = ADDRESS];
+  uint64 value = 2 [jstype = JS_STRING];
+}
+message token_allowances_page {
+  bytes owner = 1 [(koinos.btype) = ADDRESS];
+  repeated token_spender_value allowances = 2;
+}
+
+/*
+* Events
+*/
+message owner_changed_event {
+  bytes old_owner = 1 [(koinos.btype) = ADDRESS];
+  bytes new_owner = 2 [(koinos.btype) = ADDRESS];
+}
+
+message owner_proposed_event {
+  bytes owner = 1 [(koinos.btype) = ADDRESS];
+  bytes pending_owner = 2 [(koinos.btype) = ADDRESS];
+}
+
+message fee_amount_enabled_event {
+  uint32 fee = 1;
+  int32 tick_spacing = 2;
+}
+
+message pool_created_event {
+  string token0 = 1;
+  string token1 = 2;
+  uint32 fee = 3;
+  int32 tick_spacing = 4;
+  bytes pool = 5 [(koinos.btype) = ADDRESS];
+}
+
+message allowances_exempt_event {
+  string token = 1;
+  bytes token_address = 2 [(koinos.btype) = ADDRESS];
+  bool exempt = 3;
+}

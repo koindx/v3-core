@@ -1,0 +1,19 @@
+# CI of the koindx/v3-core repository (GitHub only runs workflows at the root of a repository:
+# it is inactive while this folder lives in the KoinDX v3 monorepo)
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    name: Lint, unit tests and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+      - run: yarn --frozen-lockfile
+      - run: yarn lint
+      - run: yarn test
+      - run: yarn build:release

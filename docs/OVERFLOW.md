@@ -1,0 +1,107 @@
+# Overflow analysis
+
+AssemblyScript integers (`u32`, `u64`, `i64`...) wrap around silently, exactly like the 64-bit
+overflow that forced KoinDX v2 to compute `u64 × u64` products with `u128`. Uniswap v3 needs
+even wider numbers, so this document explains how every big number of KoinDX v3 is protected.
+
+## Why 256-bit integers are needed
+
+Token amounts are `u64` (Koinos tokens), as in v2. But the v3 math works with:
+
+| Value | Format | Max bits |
+|---|---|---|
+| `sqrtPriceX96` | Q64.96 | 160 |
+| liquidity | uint128 | 128 |
+| `liquidity << 96` (`getAmount0Delta`) | | 224 |
+| `(liquidity << 96) × (√B − √A)` | intermediate of `mulDiv` | 384 |
+| `ratio × constant` (`TickMath`) | Q128.128 × Q128 | 256 |
+| `feeGrowthGlobal*X128` | Q128.128, modular | 256 |
+| `secondsPerLiquidityCumulativeX128` | Q128.128, modular | 160 |
+
+A pool with liquidity 10^15 at price 1 already needs 239 bits in `getAmount0Delta`, so
+`u128` is not enough even as an intermediate type.
+
+## Rule: checked by default
+
+`U256.add`, `sub`, `mul` and `shl` revert (`KOINDX: U256_*_OVERFLOW`) when the result doesn't
+fit in 256 bits, like Solidity >= 0.8. `mulDiv`/`mulDivRoundingUp` keep a full 512-bit
+intermediate product and revert if the final result doesn't fit in 256 bits (`FullMath`).
+
+Narrowing conversions go through `SafeCast` and revert instead of truncating:
+
+| Conversion | Where |
+|---|---|
+| `toU64` | every token amount sent/received by a pool, including the swap amounts in and out (Koinos tokens are 64 bits) |
+| `toUint128` | liquidity (`LiquidityMath`, `LiquidityAmounts`), fees owed to a position |
+| `toUint160` | sqrt prices (`SqrtPriceMath`) |
+| `checkInt128` | liquidity deltas and `liquidityNet` |
+
+## Intended modular arithmetic
+
+Only these operations use the explicit `wrappingAdd` / `wrappingSub` / `wrappingMul`. In all of
+them Uniswap relies on modular arithmetic on purpose (they are `unchecked` in the Uniswap v3
+0.8 branch and the value is only used through differences):
+
+| Operation | Modulus | Why |
+|---|---|---|
+| `feeGrowthGlobal*X128 += fee × 2^128 / L` | 2^256 | fee growth is a relative accumulator |
+| `Tick.getFeeGrowthInside`: `global − below − above` | 2^256 | the absolute value may "underflow"; the difference between two snapshots of a position is exact modulo 2^256 |
+| `Tick.cross`: `global − outside` | 2^256 | same as above |
+| `Position.update`: `feeGrowthInside − feeGrowthInsideLast` | 2^256 | same as above, the result is the real amount of fees (≤ token supply) |
+| `secondsPerLiquidity*X128` (Oracle, Tick.cross, snapshotCumulativesInside) | 2^160 | uint160 relative accumulator |
+| `SqrtPriceMath`: `numerator1 + product` | 2^256 | the overflow is detected right after (`denominator >= numerator1`) |
+| `TickMath.getTickAtSqrtRatio`: `log2 × multiplier ± error` | 2^256 | two's complement arithmetic (log2 may be negative) |
+| block timestamps, `secondsOutside` (`u32`) | 2^32 | `uint32(block.timestamp)` in Uniswap, compared with `Oracle.lte` |
+
+## Accumulators that Uniswap lets overflow
+
+Uniswap truncates the fees owed to a position to `uint128` and lets `tokensOwed0/1` and
+`protocolFees.token0/1` wrap around at 2^128 ("overflow is acceptable, have to withdraw before
+you hit type(uint128).max fees"). KoinDX does exactly the same (`U256.truncate(..., 128)` and
+`addUint128Wrapping` in the pool), so poking or burning a position and swapping can never revert
+because of these accumulators. The Uniswap test "works well after the cap binds" (fee growth set
+to `2^256 - 1`) checks it.
+
+They hold amounts of a Koinos token that the pool must pay, bounded by the token supply
+(< 2^64), so in practice they never get close to 2^128. A first version reverted on this
+overflow (`SafeCast.addUint128`): that could only happen in the same artificial scenario, but it
+would have locked the liquidity of the position (burn reverting) instead of losing the excess
+fees like Uniswap.
+
+## Native integers (u32 / u64 / i32 / i64)
+
+| Operation | Bound |
+|---|---|
+| `tickCumulative` (i64, int56 in Uniswap) | `|tick| < 2^20` × elapsed seconds (< 2^37 even after 4000 years) < 2^57 |
+| tick arithmetic in `TickBitmap` (i32) | `|tick| ≤ 887272`, `tickSpacing < 16384` → `< 2^23` |
+| `balanceBefore + amount` (u64) | `addU64`, checked |
+| `paid = balanceAfter − balanceBefore` (flash) | guarded by `balanceBefore + fee ≤ balanceAfter` |
+| observation indexes | `< 65536`; cardinality ≥ 1 after `initialize` (guarded by the lock) |
+| `feeProtocol` | `≤ 10 + (10 << 4)` |
+
+## Tests
+
+- `tests/math.test.js`: randomized differential tests (`FUZZ_RUNS`, 20 000 runs per test in CI
+  style runs) against a BigInt transliteration of the Solidity code (`tests/reference.js`,
+  including every `require`) and against the official `@uniswap/v3-sdk`.
+- `tests/overflow.test.js`:
+  - every operation with values around every 32/64-bit limb boundary,
+  - the "add back" step of the Knuth division, which random inputs almost never reach
+    (fixtures generated by `tests/tools/knuth-search.js`, including 512-bit dividends),
+  - the extreme values allowed by Koinos and by the protocol: `u64::MAX` amounts (also
+    swapped), max liquidity per tick of every tick spacing, `uint128::MAX` liquidity,
+    min/max ticks and prices, every fee tier. The results must be identical to the arbitrary
+    precision reference and every revert must happen exactly where Solidity reverts.
+- `tests/as-bignum.test.js`: the test vectors of
+  [btc-vision/as-bignum](https://github.com/btc-vision/as-bignum) v1.0.0, an AssemblyScript
+  big integer library audited by Verichains (`u256.spec.ts`, `u256_2.spec.ts`,
+  `u256_complement.spec.ts`, `audit.spec.ts`, `global.spec.ts` and the `u128.spec.ts` vectors
+  that are valid 256-bit operations), plus the findings of its audit report (H-01 to H-05,
+  L-01) adapted to our types. as-bignum wraps on overflow: here the checked operations must
+  revert and the `wrapping*` operations must return the as-bignum result. Every expected value
+  is also checked against BigInt. The file is shared by v3-core and v3-periphery.
+
+Differences with as-bignum found by these tests, all on purpose: negative shift amounts revert
+(as-bignum returns zero), `fromString` rejects anything that is not a decimal number in
+[0, 2^256 - 1] (as-bignum truncates or ignores invalid characters), `toU64` reverts instead of
+truncating, bytes are big endian without leading zeros (Koinos storage) and up to 32 bytes.

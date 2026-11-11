@@ -1,0 +1,477 @@
+syntax = "proto3";
+package pool;
+import "koinos/options.proto";
+
+/*
+* Conventions
+* - token amounts are uint64, like the Koinos tokens (KCS-1 / KCS-4: `value` is a uint64)
+* - swaps: `zero_for_one` gives the direction (token0 in and token1 out, or the opposite) and the
+*   amounts are uint64 absolute values: `amount_in` is paid to the pool, `amount_out` is sent by
+*   the pool (Uniswap's signed deltas: amount0 = +amount_in / -amount_out...)
+* - big numbers (prices Q64.96, liquidity, fee growth Q128.128...) are decimal strings in the API
+*   and compact big endian bytes in the internal storage records
+* - repeated numbers are [packed = true] (proto3 encoding of koilib), checked by scripts/build.js
+*/
+
+/*
+* Objects
+*/
+message empty_object {}
+
+message str {
+  string value = 1;
+}
+
+message boole {
+  bool value = 1;
+}
+
+message address {
+  bytes value = 1 [(koinos.btype) = ADDRESS];
+}
+
+// token identifier: system tokens (koin, vhp) are resolved through the name service
+message token_object {
+  bool is_nameservice = 1;
+  string nameservice = 2;
+  bytes token_address = 3 [(koinos.btype) = ADDRESS];
+}
+
+/*
+* Storage records (internal)
+*/
+message config_record {
+  bytes factory = 1 [(koinos.btype) = ADDRESS];
+  token_object token0 = 2;
+  token_object token1 = 3;
+  uint32 fee = 4;
+  sint32 tick_spacing = 5;
+  bytes max_liquidity_per_tick = 6;
+}
+
+// slot0 + global accumulators, read and written once per operation
+message state_record {
+  bytes sqrt_price_x96 = 1;
+  sint32 tick = 2;
+  uint32 observation_index = 3;
+  uint32 observation_cardinality = 4;
+  uint32 observation_cardinality_next = 5;
+  uint32 fee_protocol = 6;
+  bool unlocked = 7;
+  bytes fee_growth_global0_x128 = 8;
+  bytes fee_growth_global1_x128 = 9;
+  bytes protocol_fees_token0 = 10;
+  bytes protocol_fees_token1 = 11;
+  bytes liquidity = 12;
+}
+
+message tick_record {
+  bytes liquidity_gross = 1;
+  bytes liquidity_net = 2;
+  bytes fee_growth_outside0_x128 = 3;
+  bytes fee_growth_outside1_x128 = 4;
+  sint64 tick_cumulative_outside = 5;
+  bytes seconds_per_liquidity_outside_x128 = 6;
+  uint32 seconds_outside = 7;
+  bool initialized = 8;
+}
+
+message bitmap_record {
+  bytes value = 1;
+}
+
+message position_record {
+  bytes liquidity = 1;
+  bytes fee_growth_inside0_last_x128 = 2;
+  bytes fee_growth_inside1_last_x128 = 3;
+  bytes tokens_owed0 = 4;
+  bytes tokens_owed1 = 5;
+}
+
+message observation_record {
+  uint32 block_timestamp = 1;
+  sint64 tick_cumulative = 2;
+  bytes seconds_per_liquidity_cumulative_x128 = 3;
+  bool initialized = 4;
+}
+
+/*
+* Callbacks (arguments sent to the caller of mint / swap / flash)
+* Wire compatible with the `koindx_v3_*_callback_arguments` messages of the periphery
+*/
+message mint_callback_args {
+  uint64 amount0_owed = 1 [jstype = JS_STRING];
+  uint64 amount1_owed = 2 [jstype = JS_STRING];
+  bytes data = 3;
+}
+
+// zero_for_one: the pool is owed `amount_in` of token0 and sent `amount_out` of token1 (or the
+// opposite). Uniswap: amount0Delta / amount1Delta, positive owed to the pool, negative sent by it
+message swap_callback_args {
+  bool zero_for_one = 1;
+  uint64 amount_in = 2 [jstype = JS_STRING];
+  uint64 amount_out = 3 [jstype = JS_STRING];
+  bytes data = 4;
+}
+
+message flash_callback_args {
+  uint64 fee0 = 1 [jstype = JS_STRING];
+  uint64 fee1 = 2 [jstype = JS_STRING];
+  bytes data = 3;
+}
+
+/*
+* Read methods
+*/
+
+// @description Get the immutable parameters of the pool (factory, tokens, fee and tick spacing)
+// @read-only true
+message get_immutables_arguments {}
+message get_immutables_result {
+  bytes factory = 1 [(koinos.btype) = ADDRESS];
+  bytes token0 = 2 [(koinos.btype) = ADDRESS];
+  bytes token1 = 3 [(koinos.btype) = ADDRESS];
+  uint32 fee = 4;
+  int32 tick_spacing = 5;
+  string max_liquidity_per_tick = 6;
+  token_object token0_object = 7;
+  token_object token1_object = 8;
+}
+
+// @description Get the current price, tick, oracle state, protocol fee and lock status
+// @read-only true
+message slot0_arguments {}
+message slot0_result {
+  string sqrt_price_x96 = 1;
+  int32 tick = 2;
+  uint32 observation_index = 3;
+  uint32 observation_cardinality = 4;
+  uint32 observation_cardinality_next = 5;
+  uint32 fee_protocol = 6;
+  bool unlocked = 7;
+}
+
+// @description Get the currently in range liquidity available to the pool
+// @read-only true
+// @result str
+message liquidity_arguments {}
+
+// @description Get the fee growth per unit of liquidity (Q128.128) of both tokens
+// @read-only true
+message fee_growth_global_arguments {}
+message fee_growth_global_result {
+  string fee_growth_global0_x128 = 1;
+  string fee_growth_global1_x128 = 2;
+}
+
+// @description Get the amounts of token0 and token1 owed to the protocol
+// @read-only true
+message protocol_fees_arguments {}
+message protocol_fees_result {
+  string token0 = 1;
+  string token1 = 2;
+}
+
+// @description Look up information about a specific tick in the pool
+// @read-only true
+message ticks_arguments {
+  int32 tick = 1;
+}
+message ticks_result {
+  string liquidity_gross = 1;
+  string liquidity_net = 2;
+  string fee_growth_outside0_x128 = 3;
+  string fee_growth_outside1_x128 = 4;
+  int64 tick_cumulative_outside = 5 [jstype = JS_STRING];
+  string seconds_per_liquidity_outside_x128 = 6;
+  uint32 seconds_outside = 7;
+  bool initialized = 8;
+}
+
+// @description Get a 256 bit word of the packed tick initialized boolean values
+// @read-only true
+// @result str
+message tick_bitmap_arguments {
+  int32 word_position = 1;
+}
+
+// @description Get the information about a position
+// @read-only true
+message positions_arguments {
+  bytes owner = 1 [(koinos.btype) = ADDRESS];
+  int32 tick_lower = 2;
+  int32 tick_upper = 3;
+}
+message positions_result {
+  string liquidity = 1;
+  string fee_growth_inside0_last_x128 = 2;
+  string fee_growth_inside1_last_x128 = 3;
+  string tokens_owed0 = 4;
+  string tokens_owed1 = 5;
+}
+
+// @description Get an observation of the oracle by index
+// @read-only true
+message observations_arguments {
+  uint32 index = 1;
+}
+message observations_result {
+  uint32 block_timestamp = 1;
+  int64 tick_cumulative = 2 [jstype = JS_STRING];
+  string seconds_per_liquidity_cumulative_x128 = 3;
+  bool initialized = 4;
+}
+
+// @description Get the cumulative tick and liquidity as of each timestamp `seconds_agos` from the current block timestamp
+// @read-only true
+message observe_arguments {
+  repeated uint32 seconds_agos = 1 [packed = true];
+}
+message observe_result {
+  repeated int64 tick_cumulatives = 1 [jstype = JS_STRING, packed = true];
+  repeated string seconds_per_liquidity_cumulative_x128s = 2;
+}
+
+// @description Get a snapshot of the tick cumulative, seconds per liquidity and seconds inside a tick range
+// @read-only true
+message snapshot_cumulatives_inside_arguments {
+  int32 tick_lower = 1;
+  int32 tick_upper = 2;
+}
+message snapshot_cumulatives_inside_result {
+  int64 tick_cumulative_inside = 1 [jstype = JS_STRING];
+  string seconds_per_liquidity_inside_x128 = 2;
+  uint32 seconds_inside = 3;
+}
+
+// @description Get a page of initialized ticks (like Uniswap TickLens), ordered by tick
+// @read-only true
+// the initialized ticks after `start` (excluded) in ascending order, or before it in descending
+// order: start at MIN_TICK - 1 (or MAX_TICK + 1 descending) to include the first tick
+message get_populated_ticks_arguments {
+  int32 start = 1;
+  uint32 limit = 2;
+  bool descending = 3;
+}
+message populated_tick {
+  int32 tick = 1;
+  string liquidity_net = 2;
+  string liquidity_gross = 3;
+}
+message get_populated_ticks_result {
+  repeated populated_tick ticks = 1;
+}
+
+// @description Simulate a swap without modifying the state (used by the quoter)
+// @read-only true
+message quote_swap_arguments {
+  bool zero_for_one = 1;
+  bool exact_input = 2;
+  uint64 amount_specified = 3 [jstype = JS_STRING];
+  string sqrt_price_limit_x96 = 4;
+}
+message quote_swap_result {
+  uint64 amount_in = 1 [jstype = JS_STRING];
+  uint64 amount_out = 2 [jstype = JS_STRING];
+  string sqrt_price_x96_after = 3;
+  int32 tick_after = 4;
+  uint32 initialized_ticks_crossed = 5;
+}
+
+/*
+* Write methods
+*/
+
+// @description Set the immutable parameters of the pool, called once by the factory when the pool is created
+// @read-only false
+// @result empty_object
+message configure_arguments {
+  token_object token0 = 1;
+  token_object token1 = 2;
+  uint32 fee = 3;
+  int32 tick_spacing = 4;
+}
+
+// @description Set the initial price for the pool
+// @read-only false
+// @result empty_object
+message initialize_arguments {
+  string sqrt_price_x96 = 1;
+}
+
+// @description Add liquidity for the given recipient/tick_lower/tick_upper position. The caller receives a koindx_v3_mint_callback
+// @read-only false
+message mint_arguments {
+  bytes recipient = 1 [(koinos.btype) = ADDRESS];
+  int32 tick_lower = 2;
+  int32 tick_upper = 3;
+  string amount = 4;
+  bytes data = 5;
+}
+message mint_result {
+  uint64 amount0 = 1 [jstype = JS_STRING];
+  uint64 amount1 = 2 [jstype = JS_STRING];
+}
+
+// @description Collect tokens owed to a position. The position owner is the calling contract, or `owner` (who must authorize the operation) when called directly
+// @read-only false
+message collect_arguments {
+  bytes recipient = 1 [(koinos.btype) = ADDRESS];
+  int32 tick_lower = 2;
+  int32 tick_upper = 3;
+  uint64 amount0_requested = 4 [jstype = JS_STRING];
+  uint64 amount1_requested = 5 [jstype = JS_STRING];
+  bytes owner = 6 [(koinos.btype) = ADDRESS];
+}
+message collect_result {
+  uint64 amount0 = 1 [jstype = JS_STRING];
+  uint64 amount1 = 2 [jstype = JS_STRING];
+}
+
+// @description Burn liquidity from the sender and account tokens owed for the liquidity to the position. The position owner is the calling contract, or `owner` (who must authorize the operation) when called directly
+// @read-only false
+message burn_arguments {
+  int32 tick_lower = 1;
+  int32 tick_upper = 2;
+  string amount = 3;
+  bytes owner = 4 [(koinos.btype) = ADDRESS];
+}
+message burn_result {
+  uint64 amount0 = 1 [jstype = JS_STRING];
+  uint64 amount1 = 2 [jstype = JS_STRING];
+}
+
+// @description Swap token0 for token1 (zero_for_one), or token1 for token0. Exact input: `amount_specified` of the input token is paid, exact output: `amount_specified` of the output token is received. The caller receives a koindx_v3_swap_callback
+// @read-only false
+message swap_arguments {
+  bytes recipient = 1 [(koinos.btype) = ADDRESS];
+  bool zero_for_one = 2;
+  bool exact_input = 3;
+  uint64 amount_specified = 4 [jstype = JS_STRING];
+  string sqrt_price_limit_x96 = 5;
+  bytes data = 6;
+}
+message swap_result {
+  uint64 amount_in = 1 [jstype = JS_STRING];
+  uint64 amount_out = 2 [jstype = JS_STRING];
+}
+
+// @description Receive token0 and/or token1 and pay it back, plus a fee, in the koindx_v3_flash_callback
+// @read-only false
+// @result empty_object
+message flash_arguments {
+  bytes recipient = 1 [(koinos.btype) = ADDRESS];
+  uint64 amount0 = 2 [jstype = JS_STRING];
+  uint64 amount1 = 3 [jstype = JS_STRING];
+  bytes data = 4;
+}
+
+// @description Increase the maximum number of price and liquidity observations that this pool will store
+// @read-only false
+// @result empty_object
+message increase_observation_cardinality_next_arguments {
+  uint32 observation_cardinality_next = 1;
+}
+
+// @description Set the denominator of the protocol's % share of the fees (only factory owner)
+// @read-only false
+// @result empty_object
+message set_fee_protocol_arguments {
+  uint32 fee_protocol0 = 1;
+  uint32 fee_protocol1 = 2;
+}
+
+// @description Collect the protocol fee accrued to the pool (only factory owner)
+// @read-only false
+message collect_protocol_arguments {
+  bytes recipient = 1 [(koinos.btype) = ADDRESS];
+  uint64 amount0_requested = 2 [jstype = JS_STRING];
+  uint64 amount1_requested = 3 [jstype = JS_STRING];
+}
+message collect_protocol_result {
+  uint64 amount0 = 1 [jstype = JS_STRING];
+  uint64 amount1 = 2 [jstype = JS_STRING];
+}
+
+/*
+* Events
+*/
+message configure_event {
+  bytes factory = 1 [(koinos.btype) = ADDRESS];
+  bytes token0 = 2 [(koinos.btype) = ADDRESS];
+  bytes token1 = 3 [(koinos.btype) = ADDRESS];
+  uint32 fee = 4;
+  int32 tick_spacing = 5;
+}
+
+message initialize_event {
+  string sqrt_price_x96 = 1;
+  int32 tick = 2;
+}
+
+message mint_event {
+  bytes sender = 1 [(koinos.btype) = ADDRESS];
+  bytes owner = 2 [(koinos.btype) = ADDRESS];
+  int32 tick_lower = 3;
+  int32 tick_upper = 4;
+  string amount = 5;
+  uint64 amount0 = 6 [jstype = JS_STRING];
+  uint64 amount1 = 7 [jstype = JS_STRING];
+}
+
+message collect_event {
+  bytes owner = 1 [(koinos.btype) = ADDRESS];
+  bytes recipient = 2 [(koinos.btype) = ADDRESS];
+  int32 tick_lower = 3;
+  int32 tick_upper = 4;
+  uint64 amount0 = 5 [jstype = JS_STRING];
+  uint64 amount1 = 6 [jstype = JS_STRING];
+}
+
+message burn_event {
+  bytes owner = 1 [(koinos.btype) = ADDRESS];
+  int32 tick_lower = 2;
+  int32 tick_upper = 3;
+  string amount = 4;
+  uint64 amount0 = 5 [jstype = JS_STRING];
+  uint64 amount1 = 6 [jstype = JS_STRING];
+}
+
+message swap_event {
+  bytes sender = 1 [(koinos.btype) = ADDRESS];
+  bytes recipient = 2 [(koinos.btype) = ADDRESS];
+  bool zero_for_one = 3;
+  uint64 amount_in = 4 [jstype = JS_STRING];
+  uint64 amount_out = 5 [jstype = JS_STRING];
+  string sqrt_price_x96 = 6;
+  string liquidity = 7;
+  int32 tick = 8;
+}
+
+message flash_event {
+  bytes sender = 1 [(koinos.btype) = ADDRESS];
+  bytes recipient = 2 [(koinos.btype) = ADDRESS];
+  uint64 amount0 = 3 [jstype = JS_STRING];
+  uint64 amount1 = 4 [jstype = JS_STRING];
+  uint64 paid0 = 5 [jstype = JS_STRING];
+  uint64 paid1 = 6 [jstype = JS_STRING];
+}
+
+message increase_observation_cardinality_next_event {
+  uint32 observation_cardinality_next_old = 1;
+  uint32 observation_cardinality_next_new = 2;
+}
+
+message set_fee_protocol_event {
+  uint32 fee_protocol0_old = 1;
+  uint32 fee_protocol1_old = 2;
+  uint32 fee_protocol0_new = 3;
+  uint32 fee_protocol1_new = 4;
+}
+
+message collect_protocol_event {
+  bytes sender = 1 [(koinos.btype) = ADDRESS];
+  bytes recipient = 2 [(koinos.btype) = ADDRESS];
+  uint64 amount0 = 3 [jstype = JS_STRING];
+  uint64 amount1 = 4 [jstype = JS_STRING];
+}
